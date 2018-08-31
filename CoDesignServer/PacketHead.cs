@@ -14,8 +14,27 @@ namespace CoDesignServer
 {
     public class PacketHead
     {
+        // 升级
+        public const int ACTIONCODE_UPDATE = 1;
+        // 查询
+        public const int ACTIONCODE_LOCATION = 2;
+        // 插入和更新
+        public const int ACTIONCODE_INSERTANDUPDATE = 3;
+        // 上传文件
+        public const int ACTIONCODE_UPLOADFILE = 4;
+
+        // 最大ActionCode值
+        public const int ACTIONCODE_MAXVALUE = 4;
+
         //public string FileVersion;
         public PacketHead() { }
+        public void Init(int _DataBufLen, int _ActionCode, int _PacketCheck = 0, string _Version = "1.0.0.1")
+        {
+            ActionCode = _ActionCode;
+            PacketDataLength = _DataBufLen;
+            PacketCheck = _PacketCheck;
+            FileVersion = _Version;
+        }
 
         // 版本
         public string FileVersion { get => _FileVersion; set => _FileVersion = value; }

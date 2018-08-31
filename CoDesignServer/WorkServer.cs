@@ -14,17 +14,10 @@ namespace CoDesignServer
 {
     class AsyncUserToken
     {
-        // 下载偏移
-        public int DownOffsert { get => m_nDownOffsert; set => m_nDownOffsert = value; }
-        // 发送数据类型(0 - 发送头部； 1 - 发送数据)
-        public int SendType { get => _SendType; set => _SendType = value; }
-
-        // 下载偏移
-        private int m_nDownOffsert = 0;
-        // 发送数据类型(0 - 发送头部； 1 - 发送数据)
-        private int _SendType = 0;
+        // 本次连接首次处理
+        public bool bFirstProc = true;
         public Socket Socket;
-
+        public PacketProParam Param;
     }
     class SocketBufferManager
     {
@@ -127,7 +120,7 @@ namespace CoDesignServer
     }
     class WorkServer
     {
-        private int m_numConnections;   // the maximum number of connections the sample is designed to handle simultaneously 
+        private int m_nMaxConnections;   // the maximum number of connections the sample is designed to handle simultaneously 
         private int m_receiveBufferSize;// buffer size to use for each socket I/O operation 
         SocketBufferManager m_bufferManager;  // represents a large reusable set of buffers for all socket operations
         const int opsToPreAlloc = 2;    // read, write (don't alloc buffer space for accepts)
@@ -137,6 +130,7 @@ namespace CoDesignServer
         int m_totalBytesRead;           // counter of the total # bytes received by the server
         int m_numConnectedSockets;      // the total number of clients connected to the server 
         Semaphore m_maxNumberAcceptedClients;
+
 
         // Create an uninitialized server instance.  
         // To start the server listening for connection requests
@@ -148,7 +142,7 @@ namespace CoDesignServer
         {
             m_totalBytesRead = 0;
             m_numConnectedSockets = 0;
-            m_numConnections = numConnections;
+            m_nMaxConnections = numConnections;
             m_receiveBufferSize = receiveBufferSize;
             // allocate buffers such that the maximum number of sockets can have one outstanding read and 
             //write posted to the socket simultaneously  
@@ -167,7 +161,8 @@ namespace CoDesignServer
         {
             if (!UpdateFileBufMgr.Instance.LoadUpdateVer())
             {
-                return false;
+                //IsUpdate = false;
+                // return false;
             }
             // Allocates one large byte buffer which all I/O operations use a piece of.  This gaurds 
             // against memory fragmentation
@@ -176,7 +171,7 @@ namespace CoDesignServer
             // preallocate pool of SocketAsyncEventArgs objects
             SocketAsyncEventArgs readWriteEventArg;
 
-            for (int i = 0; i < m_numConnections; i++)
+            for (int i = 0; i < m_nMaxConnections; i++)
             {
                 //Pre-allocate a set of reusable SocketAsyncEventArgs
                 readWriteEventArg = new SocketAsyncEventArgs();
@@ -204,7 +199,7 @@ namespace CoDesignServer
             listenSocket = new Socket(localEndPoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
             listenSocket.Bind(localEndPoint);
             // start the server with a listen backlog of 100 connections
-            listenSocket.Listen(m_numConnections);
+            listenSocket.Listen(m_nMaxConnections);
 
             // post accepts on the listening socket
             SocketAsyncEventArgs acceptEventArg = new SocketAsyncEventArgs();
@@ -232,6 +227,11 @@ namespace CoDesignServer
         private void ProcessAccept(SocketAsyncEventArgs e)
         {
             Interlocked.Increment(ref m_numConnectedSockets);
+
+            if(m_numConnectedSockets > (9 * m_nMaxConnections / 10))
+            {
+                // 扫描释放僵尸连接
+            }
 
             //Console.WriteLine("Client connection accepted. There are {0} clients connected to the server", m_numConnectedSockets);
 
@@ -290,44 +290,23 @@ namespace CoDesignServer
             {
                 //increment the count of the total bytes receive by the server
                 Interlocked.Add(ref m_totalBytesRead, e.BytesTransferred);
-                // e.
-                //if (token.DownOffsert == 0)
-                //{
-                //}
-                PacketUpdate fp = new PacketUpdate();
-                fp.PacketFromBuf(e.Buffer, e.Offset, e.BytesTransferred);
-                if (!fp.IsValid())
+
+                bool bSend = true;
+                if (!Work.OnRecvEvent(e,ref bSend))
                 {
                     // 校验失败
                     CloseClientSocket(e);
-                    return;
-                }
-                if (fp.Head.ActionCode == 1)
+                }else
                 {
-                    string fv = fp.DataToString();
-                    int nUpdate = 0;
-                    // 比较版本
-                    if (UpdateFileBufMgr.Instance.CompareVersion(UpdateFileBufMgr.Instance.FileVersion, fv) > 0)
+                    if(bSend)
                     {
-                        // 可以升级
-                        nUpdate = 1;
+                        bool willRaiseEvent = token.Socket.SendAsync(e);
+                        if (!willRaiseEvent)
+                        {
+                            ProcessSend(e);
+                        }
                     }
-                    else
-                    {
-                        // 不需要升级
-                    }
-                    fp.CreateCVAckPacket(nUpdate, UpdateFileBufMgr.Instance.Length);
-                    fp.PacketToBuf(e.Buffer, e.Offset);
                 }
-
-                e.SetBuffer(e.Offset, fp.GetPacketLen());
-                token.SendType = 0;
-                bool willRaiseEvent = token.Socket.SendAsync(e);
-                if (!willRaiseEvent)
-                {
-                    ProcessSend(e);
-                }
-
             }
             else
             {
@@ -342,28 +321,12 @@ namespace CoDesignServer
         // <param name="e"></param>
         private void ProcessSend(SocketAsyncEventArgs e)
         {
-            if (e.SocketError == SocketError.Success)
+            if (Work.OnSendEvent(e))
             {
-                AsyncUserToken at = (AsyncUserToken)e.UserToken;
-                if(at.SendType == 1)
+                bool willRaiseEvent = ((AsyncUserToken)e.UserToken).Socket.SendAsync(e);
+                if (!willRaiseEvent)
                 {
-                    at.DownOffsert += e.BytesTransferred;
-                }
-                if (UpdateFileBufMgr.Instance.Length <= at.DownOffsert)
-                {
-                    at.DownOffsert = 0;
-                    CloseClientSocket(e);
-                }
-                else
-                {
-                    at.SendType = 1;
-                    int nLen = UpdateFileBufMgr.Instance.GetBuf(e.Buffer, e.Offset, at.DownOffsert);
-                    e.SetBuffer(e.Offset, nLen);
-                    bool willRaiseEvent = at.Socket.SendAsync(e);
-                    if (!willRaiseEvent)
-                    {
-                        ProcessSend(e);
-                    }
+                    ProcessSend(e);
                 }
             }
             else
@@ -375,8 +338,7 @@ namespace CoDesignServer
         private void CloseClientSocket(SocketAsyncEventArgs e)
         {
             AsyncUserToken token = e.UserToken as AsyncUserToken;
-            token.DownOffsert = 0;
-            token.SendType = 0;
+            token.Param = null;
 
             // close the socket associated with the client
             try
